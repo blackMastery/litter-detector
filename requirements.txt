@@ -1,0 +1,16 @@
+# Phase 0 — Litter & Dumping Detector
+# Install: pip install -r requirements.txt
+
+# Core
+streamlit>=1.32.0
+ultralytics>=8.1.0        # YOLOv8 (includes PyTorch)
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+Pillow>=10.2.0
+pandas>=2.2.0
+
+# Alerts (optional — only needed if enabled in config.py)
+twilio>=8.0.0             # SMS alerts
+
+# Dev / testing
+# pytest>=8.0.0
