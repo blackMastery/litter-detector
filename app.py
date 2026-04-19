@@ -17,10 +17,13 @@ from camera import CameraStream
 from alerts import dispatch_alerts
 import logger as event_logger
 from config import (
-    CONFIDENCE_THRESHOLD, SNAPSHOT_DIR, LOG_DIR,
+    CONFIDENCE_THRESHOLD, SNAPSHOT_DIR, LOG_DIR, RECORDING_DIR,
     ENABLE_EMAIL_ALERTS, ENABLE_SMS_ALERTS,
-    MAX_LOG_ENTRIES,
+    MAX_LOG_ENTRIES, CAMERA_NAME,
 )
+
+import os
+os.makedirs(RECORDING_DIR, exist_ok=True)
 
 # ─────────────────────────────────────────────
 #  Page config
@@ -95,6 +98,10 @@ def _init_state():
         "session_start":    None,
         "confidence":       CONFIDENCE_THRESHOLD,
         "video_source":     None,
+        "alert_status":     None,   # None | {"email": bool, "sms": bool, "time": str}
+        "recording":        False,
+        "recorder":         None,   # cv2.VideoWriter instance
+        "recording_path":   None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -138,7 +145,37 @@ with st.sidebar:
         f"Email: {'✅ enabled' if ENABLE_EMAIL_ALERTS else '⬜ disabled'}  \n"
         f"SMS: {'✅ enabled' if ENABLE_SMS_ALERTS else '⬜ disabled'}"
     )
-    st.caption("Configure in `config.py`")
+    _alert = st.session_state.alert_status
+    if _alert:
+        _parts = []
+        if ENABLE_EMAIL_ALERTS:
+            _parts.append("📧 " + ("✅ sent" if _alert["email"] else "❌ failed"))
+        if ENABLE_SMS_ALERTS:
+            _parts.append("📱 " + ("✅ sent" if _alert["sms"] else "❌ failed"))
+        if _parts:
+            st.caption(f"Last alert ({_alert['time']}): " + "  ".join(_parts))
+    st.caption("Configure credentials in `.env`")
+
+    st.markdown("---")
+    st.markdown("### 🎞 Recording")
+    if not st.session_state.recording:
+        if st.button("⏺ Start recording", use_container_width=True,
+                     disabled=not st.session_state.running):
+            st.session_state.recording = True
+    else:
+        if st.button("⏹ Stop recording", use_container_width=True, type="secondary"):
+            if st.session_state.recorder:
+                st.session_state.recorder.release()
+                st.session_state.recorder = None
+            st.session_state.recording = False
+        st.caption(f"Saving to `{Path(st.session_state.recording_path).name}`" if st.session_state.recording_path else "Initialising…")
+
+    _rec_files = sorted(Path(RECORDING_DIR).glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if _rec_files:
+        _chosen = st.selectbox("Download recording", [p.name for p in _rec_files], label_visibility="collapsed")
+        _rec_path = Path(RECORDING_DIR) / _chosen
+        with open(_rec_path, "rb") as _f:
+            st.download_button("📥 Download", _f, _chosen, "video/mp4", use_container_width=True)
 
     st.markdown("---")
     st.markdown("### 📁 Export")
@@ -178,7 +215,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 
 st.markdown("## 🗑️ AI Litter & Dumping Detector")
-st.caption("Phase 0 — Proof of Concept | CAM-01 | Hikvision S04")
+st.caption(f"Phase 0 — Proof of Concept | {CAMERA_NAME}")
 
 # Control buttons
 col_btn1, col_btn2, col_btn3, col_space = st.columns([1, 1, 1, 5])
@@ -189,7 +226,11 @@ with col_btn1:
             # Initialise detector + camera
             if st.session_state.detector is None:
                 with st.spinner("Loading model…"):
-                    st.session_state.detector = LitterDetector()
+                    try:
+                        st.session_state.detector = LitterDetector()
+                    except Exception as e:
+                        st.error(f"Model load failed: {e}\n\nCheck that `{__import__('config').GARBAGE_MODEL_PATH}` and `{__import__('config').PERSON_MODEL_PATH}` exist in the project folder.")
+                        st.stop()
 
             cam = CameraStream(source=st.session_state.video_source)
             if cam.start():
@@ -205,6 +246,10 @@ with col_btn1:
                 st.session_state.camera.stop()
             if st.session_state.detector:
                 st.session_state.detector.reset_tracker()
+            if st.session_state.recorder:
+                st.session_state.recorder.release()
+                st.session_state.recorder = None
+            st.session_state.recording = False
             st.session_state.running = False
             st.rerun()
 
@@ -253,6 +298,18 @@ def _live_view():
                 annotated, litter_dets, person_dets, dump_event = det.process_frame(
                     frame, confidence_override=conf
                 )
+
+                # ── Session recording ─────────────────
+                if st.session_state.recording:
+                    if st.session_state.recorder is None:
+                        h, w = annotated.shape[:2]
+                        rec_path = str(Path(RECORDING_DIR) /
+                                       f"session_{time.strftime('%Y%m%d_%H%M%S')}.mp4")
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        st.session_state.recorder = cv2.VideoWriter(rec_path, fourcc, 10, (w, h))
+                        st.session_state.recording_path = rec_path
+                    st.session_state.recorder.write(annotated)
+
                 ts = time.strftime("%H:%M:%S")
                 for l in litter_dets:
                     st.session_state.log_entries.append(
@@ -287,8 +344,15 @@ def _live_view():
                         dump_event.snapshot_path,
                         dump_event.person_conf, dump_event.litter_conf,
                     )
+                    def _alert_and_record(ts, label, snap):
+                        result = dispatch_alerts(ts, label, snap)
+                        st.session_state.alert_status = {
+                            "email": result.get("email", False),
+                            "sms":   result.get("sms", False),
+                            "time":  ts,
+                        }
                     threading.Thread(
-                        target=dispatch_alerts,
+                        target=_alert_and_record,
                         args=(dump_event.timestamp, dump_event.litter_label,
                               dump_event.snapshot_path),
                         daemon=True,
@@ -368,7 +432,7 @@ def _live_view():
                   <div class="incident-meta">
                     🕐 {ev['timestamp']} &nbsp;|&nbsp;
                     📦 {ev['litter_label']} &nbsp;|&nbsp;
-                    CAM-01
+                    {CAMERA_NAME}
                   </div>
                   <div class="incident-meta">
                     Person conf: {ev['person_conf']:.0%} &nbsp;|&nbsp;

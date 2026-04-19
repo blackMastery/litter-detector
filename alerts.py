@@ -15,7 +15,7 @@ from config import (
     SMTP_USER, SMTP_PASS, ALERT_RECIPIENT,
     ENABLE_SMS_ALERTS,
     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
-    TWILIO_FROM, TWILIO_TO,
+    TWILIO_FROM, TWILIO_TO, CAMERA_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def send_email_alert(
         <h2 style="color:#c0392b">⚠ Illegal Dumping Detected</h2>
         <table style="font-family:sans-serif;font-size:14px">
           <tr><td><b>Time</b></td><td>{timestamp}</td></tr>
-          <tr><td><b>Camera</b></td><td>CAM-01</td></tr>
+          <tr><td><b>Camera</b></td><td>{CAMERA_NAME}</td></tr>
           <tr><td><b>Item detected</b></td><td>{litter_label}</td></tr>
         </table>
         <p>A snapshot has been saved and attached to this email.</p>
@@ -85,7 +85,7 @@ def send_sms_alert(timestamp: str, litter_label: str) -> bool:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         message = client.messages.create(
             body=(
-                f"LITTER ALERT | CAM-01\n"
+                f"LITTER ALERT | {CAMERA_NAME}\n"
                 f"Time: {timestamp}\n"
                 f"Item: {litter_label}\n"
                 f"Dumping detected — check dashboard."

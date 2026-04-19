@@ -12,5 +12,8 @@ pandas>=2.2.0
 # Alerts (optional — only needed if enabled in config.py)
 twilio>=8.0.0             # SMS alerts
 
+# Config / secrets
+python-dotenv>=1.0.0      # load credentials from .env instead of config.py
+
 # Dev / testing
 # pytest>=8.0.0

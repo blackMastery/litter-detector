@@ -19,7 +19,7 @@ from config import (
     PREPROCESS_CLAHE, CLAHE_CLIP_LIMIT, CLAHE_TILE_SIZE,
     GROUND_FILTER_ENABLED, GROUND_ZONE_RATIO,
     PILE_DETECTION_ENABLED, PILE_CLUSTER_DIST, PILE_MIN_ITEMS,
-    TRACKER_MAX_ABSENT,
+    TRACKER_MAX_ABSENT, CAMERA_NAME,
 )
 from tracker import ObjectTracker
 
@@ -248,7 +248,7 @@ class LitterDetector:
 
         # ── Timestamp overlay on frame
         ts = time.strftime("%Y-%m-%d  %H:%M:%S")
-        cv2.putText(frame, f"CAM-01  |  {ts}",
+        cv2.putText(frame, f"{CAMERA_NAME}  |  {ts}",
                     (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                     (200, 200, 200), 1, cv2.LINE_AA)
 

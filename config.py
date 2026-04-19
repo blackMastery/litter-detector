@@ -2,10 +2,14 @@
 #  config.py  —  Phase 0 Litter Detector
 # ─────────────────────────────────────────────
 
+import os
+from dotenv import load_dotenv
+load_dotenv()   # reads .env if present; safe to call even if .env doesn't exist
+
 # ── Camera ────────────────────────────────────
-# Hikvision S04 — update with your camera's IP/credentials
-# Format: rtsp://username:password@camera_ip:554/Streaming/Channels/101
-RTSP_URL = "rtsp://admin:admin123@192.168.1.100:554/Streaming/Channels/101"
+# Set RTSP_URL in .env — never hardcode credentials here.
+RTSP_URL = os.getenv("RTSP_URL", "rtsp://admin:admin@192.168.1.100:554/Streaming/Channels/101")
+CAMERA_NAME = os.getenv("CAMERA_NAME", "CAM-01")
 
 # For local webcam testing (set to 0 for default webcam, or a video file path)
 USE_WEBCAM = False
@@ -64,19 +68,20 @@ DUMP_COOLDOWN_SECONDS = 10
 ENABLE_EMAIL_ALERTS = False
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
-SMTP_USER = "your@gmail.com"
-SMTP_PASS = "your_app_password"   # use Gmail App Password, not account password
-ALERT_RECIPIENT = "supervisor@yourorg.com"
+SMTP_USER          = os.getenv("SMTP_USER", "")
+SMTP_PASS          = os.getenv("SMTP_PASS", "")
+ALERT_RECIPIENT    = os.getenv("ALERT_RECIPIENT", "")
 
 ENABLE_SMS_ALERTS = False
-TWILIO_ACCOUNT_SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-TWILIO_AUTH_TOKEN  = "your_twilio_auth_token"
-TWILIO_FROM        = "+1xxxxxxxxxx"
-TWILIO_TO          = "+1xxxxxxxxxx"
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM        = os.getenv("TWILIO_FROM", "")
+TWILIO_TO          = os.getenv("TWILIO_TO", "")
 
 # ── Storage ───────────────────────────────────
-SNAPSHOT_DIR = "snapshots"
-LOG_DIR = "logs"
+SNAPSHOT_DIR  = "snapshots"
+LOG_DIR       = "logs"
+RECORDING_DIR = "recordings"
 MAX_LOG_ENTRIES = 500   # keep last N entries in session
 
 # ── Display ───────────────────────────────────
