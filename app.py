@@ -94,6 +94,7 @@ def _init_state():
         "stat_incidents":   0,
         "session_start":    None,
         "confidence":       CONFIDENCE_THRESHOLD,
+        "video_source":     None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -113,8 +114,22 @@ with st.sidebar:
         "Confidence threshold",
         min_value=0.20, max_value=0.90,
         value=st.session_state.confidence, step=0.05,
-        format="%.0%%",
+        format="%.0f%%",
         help="Lower = more detections, higher = fewer false positives"
+    )
+
+    st.markdown("---")
+    st.markdown("### 🎬 Video Source")
+    _test_footage = sorted(Path("test_footage").glob("*.mp4"))
+    _source_options = ["🎥 Live Camera (RTSP/Webcam)"] + [f.name for f in _test_footage]
+    _selected = st.selectbox(
+        "Source", _source_options,
+        disabled=st.session_state.running,
+        help="Pick a test clip or use the live camera feed"
+    )
+    st.session_state.video_source = (
+        None if _selected == _source_options[0]
+        else str(Path("test_footage") / _selected)
     )
 
     st.markdown("---")
@@ -176,7 +191,7 @@ with col_btn1:
                 with st.spinner("Loading model…"):
                     st.session_state.detector = LitterDetector()
 
-            cam = CameraStream()
+            cam = CameraStream(source=st.session_state.video_source)
             if cam.start():
                 st.session_state.camera = cam
                 st.session_state.running = True
@@ -188,6 +203,8 @@ with col_btn1:
         if st.button("⏹ Stop", type="secondary", use_container_width=True):
             if st.session_state.camera:
                 st.session_state.camera.stop()
+            if st.session_state.detector:
+                st.session_state.detector.reset_tracker()
             st.session_state.running = False
             st.rerun()
 
@@ -198,6 +215,8 @@ with col_btn2:
         st.session_state.stat_litter   = 0
         st.session_state.stat_persons  = 0
         st.session_state.stat_incidents = 0
+        if st.session_state.detector:
+            st.session_state.detector.reset_tracker()
         st.rerun()
 
 with col_btn3:
@@ -206,223 +225,171 @@ with col_btn3:
 
 
 # ─────────────────────────────────────────────
-#  Status bar
+#  Live view — fragment streams WebSocket deltas
+#  to the browser every 100 ms without triggering
+#  a full page re-render.
 # ─────────────────────────────────────────────
 
-status_placeholder = st.empty()
+@st.fragment(run_every=0.1)
+def _live_view():
+    import threading
 
-def render_status(litter_count=0, person_count=0, dump=False):
+    cam  = st.session_state.camera
+    det  = st.session_state.detector
+    conf = st.session_state.confidence
+
+    annotated    = None
+    litter_dets  = []
+    person_dets  = []
+    dump_event   = None
+
+    # ── Run detection ─────────────────────────
+    if st.session_state.running:
+        if cam is None or not cam.is_connected:
+            st.session_state.running = False
+        else:
+            frame = cam.read()
+            if frame is not None:
+                annotated, litter_dets, person_dets, dump_event = det.process_frame(
+                    frame, confidence_override=conf
+                )
+                ts = time.strftime("%H:%M:%S")
+                for l in litter_dets:
+                    st.session_state.log_entries.append(
+                        [ts, "litter", l.label, f"{l.confidence:.0%}"])
+                    if l.is_new:
+                        st.session_state.stat_litter += 1
+                        event_logger.log_detection(l.label, l.confidence, "litter")
+                for p in person_dets:
+                    st.session_state.log_entries.append(
+                        [ts, "person", p.label, f"{p.confidence:.0%}"])
+                    if p.is_new:
+                        st.session_state.stat_persons += 1
+                        event_logger.log_detection(p.label, p.confidence, "person")
+                if len(st.session_state.log_entries) > MAX_LOG_ENTRIES:
+                    st.session_state.log_entries = (
+                        st.session_state.log_entries[-MAX_LOG_ENTRIES:])
+                if dump_event:
+                    ev_dict = {
+                        "timestamp":     dump_event.timestamp,
+                        "litter_label":  dump_event.litter_label,
+                        "person_conf":   dump_event.person_conf,
+                        "litter_conf":   dump_event.litter_conf,
+                        "snapshot_path": dump_event.snapshot_path,
+                    }
+                    st.session_state.dump_events.append(ev_dict)
+                    st.session_state.stat_incidents += 1
+                    st.session_state.log_entries.append(
+                        [dump_event.timestamp, "⚠ DUMP",
+                         dump_event.litter_label, "EVENT"])
+                    event_logger.log_incident(
+                        dump_event.timestamp, dump_event.litter_label,
+                        dump_event.snapshot_path,
+                        dump_event.person_conf, dump_event.litter_conf,
+                    )
+                    threading.Thread(
+                        target=dispatch_alerts,
+                        args=(dump_event.timestamp, dump_event.litter_label,
+                              dump_event.snapshot_path),
+                        daemon=True,
+                    ).start()
+
+    # ── Status badge ──────────────────────────
+    dump_occurred = dump_event is not None
     if not st.session_state.running:
-        status_placeholder.markdown(
+        st.markdown(
             '<span class="badge badge-clear">⏸ Detection stopped</span>',
             unsafe_allow_html=True)
-    elif dump:
-        status_placeholder.markdown(
+    elif dump_occurred:
+        st.markdown(
             '<span class="badge badge-dump">🚨 DUMPING IN PROGRESS — Snapshot saved</span>',
             unsafe_allow_html=True)
-    elif litter_count > 0:
-        status_placeholder.markdown(
-            f'<span class="badge badge-litter">⚠️ {litter_count} litter item(s) detected in frame</span>',
+    elif litter_dets:
+        st.markdown(
+            f'<span class="badge badge-litter">⚠️ {len(litter_dets)}'
+            ' litter item(s) detected in frame</span>',
             unsafe_allow_html=True)
-    elif person_count > 0:
-        status_placeholder.markdown(
-            f'<span class="badge badge-person">👤 {person_count} person(s) in view — monitoring</span>',
+    elif person_dets:
+        st.markdown(
+            f'<span class="badge badge-person">👤 {len(person_dets)}'
+            ' person(s) in view — monitoring</span>',
             unsafe_allow_html=True)
     else:
-        status_placeholder.markdown(
+        st.markdown(
             '<span class="badge badge-clear">✅ Area clear</span>',
             unsafe_allow_html=True)
 
-render_status()
+    st.markdown("---")
 
-st.markdown("---")
+    left_col, right_col = st.columns([3, 2], gap="medium")
 
+    # ── Left panel ────────────────────────────
+    with left_col:
+        st.markdown("### 📹 Live Feed")
+        if annotated is not None:
+            frame_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            st.image(frame_rgb, use_column_width=True, channels="RGB")
+        else:
+            st.info("Press **▶ Start** to connect to the camera.")
 
-# ─────────────────────────────────────────────
-#  Main layout
-# ─────────────────────────────────────────────
-
-left_col, right_col = st.columns([3, 2], gap="medium")
-
-# ── Left: live feed + stats ──
-
-with left_col:
-    st.markdown("### 📹 Live Feed")
-    feed_placeholder = st.empty()
-    feed_placeholder.info("Press **▶ Start** to connect to the camera.")
-
-    st.markdown("### 📊 Session Stats")
-    m1, m2, m3, m4 = st.columns(4)
-    stat_litter_ph   = m1.empty()
-    stat_persons_ph  = m2.empty()
-    stat_incidents_ph = m3.empty()
-    stat_uptime_ph   = m4.empty()
-
-    def render_stats():
-        uptime = ""
+        st.markdown("### 📊 Session Stats")
+        m1, m2, m3, m4 = st.columns(4)
+        _uptime = ""
         if st.session_state.session_start:
-            secs = int(time.time() - st.session_state.session_start)
-            uptime = f"{secs//60:02d}:{secs%60:02d}"
-        stat_litter_ph.metric("Litter items",  st.session_state.stat_litter)
-        stat_persons_ph.metric("Persons",       st.session_state.stat_persons)
-        stat_incidents_ph.metric("🚨 Incidents", st.session_state.stat_incidents)
-        stat_uptime_ph.metric("Uptime",         uptime or "—")
+            _secs = int(time.time() - st.session_state.session_start)
+            _uptime = f"{_secs//60:02d}:{_secs%60:02d}"
+        m1.metric("Litter items",  st.session_state.stat_litter)
+        m2.metric("Persons",       st.session_state.stat_persons)
+        m3.metric("🚨 Incidents",  st.session_state.stat_incidents)
+        m4.metric("Uptime",        _uptime or "—")
 
-    render_stats()
+        st.markdown("### 📋 Detection Log")
+        _entries = st.session_state.log_entries[-50:][::-1]
+        if not _entries:
+            st.caption("No detections yet.")
+        else:
+            _df = pd.DataFrame(_entries, columns=["Time", "Type", "Label", "Confidence"])
+            st.dataframe(_df, use_container_width=True, hide_index=True,
+                         height=min(300, len(_df) * 35 + 38))
 
-    st.markdown("### 📋 Detection Log")
-    log_placeholder = st.empty()
-
-    def render_log():
-        entries = st.session_state.log_entries[-50:][::-1]
-        if not entries:
-            log_placeholder.caption("No detections yet.")
-            return
-        df = pd.DataFrame(entries, columns=["Time", "Type", "Label", "Confidence"])
-        log_placeholder.dataframe(
-            df, use_container_width=True, hide_index=True,
-            height=min(300, len(df) * 35 + 38),
-        )
-
-    render_log()
-
-
-# ── Right: incidents ──
-
-with right_col:
-    st.markdown("### 🚨 Dumping Incidents")
-    incidents_placeholder = st.empty()
-
-    def render_incidents():
+    # ── Right panel ───────────────────────────
+    with right_col:
+        st.markdown("### 🚨 Dumping Incidents")
         events = st.session_state.dump_events[::-1]
         if not events:
-            incidents_placeholder.info("No incidents recorded this session.")
-            return
+            st.info("No incidents recorded this session.")
+        else:
+            html_parts = []
+            for i, ev in enumerate(events):
+                n = len(events) - i
+                html_parts.append(f"""
+                <div class="incident-card">
+                  <div class="incident-title">Dumping Event #{n}</div>
+                  <div class="incident-meta">
+                    🕐 {ev['timestamp']} &nbsp;|&nbsp;
+                    📦 {ev['litter_label']} &nbsp;|&nbsp;
+                    CAM-01
+                  </div>
+                  <div class="incident-meta">
+                    Person conf: {ev['person_conf']:.0%} &nbsp;|&nbsp;
+                    Litter conf: {ev['litter_conf']:.0%}
+                  </div>
+                </div>
+                """)
+            st.markdown("".join(html_parts), unsafe_allow_html=True)
 
-        html_parts = []
-        for i, ev in enumerate(events):
-            n = len(events) - i
-            html_parts.append(f"""
-            <div class="incident-card">
-              <div class="incident-title">Dumping Event #{n}</div>
-              <div class="incident-meta">
-                🕐 {ev['timestamp']} &nbsp;|&nbsp;
-                📦 {ev['litter_label']} &nbsp;|&nbsp;
-                CAM-01
-              </div>
-              <div class="incident-meta">
-                Person conf: {ev['person_conf']:.0%} &nbsp;|&nbsp;
-                Litter conf: {ev['litter_conf']:.0%}
-              </div>
-            </div>
-            """)
-        incidents_placeholder.markdown("".join(html_parts), unsafe_allow_html=True)
-
-    render_incidents()
-
-    # Latest snapshot
-    st.markdown("### 📸 Latest Snapshot")
-    snap_placeholder = st.empty()
-
-    def render_snapshot():
-        events = st.session_state.dump_events
-        if not events:
-            snap_placeholder.caption("Snapshots appear here when a dumping event is detected.")
-            return
-        latest = events[-1]
-        snap_path = latest.get("snapshot_path")
-        if snap_path and Path(snap_path).exists():
-            img = Image.open(snap_path)
-            snap_placeholder.image(
-                img, caption=f"Event at {latest['timestamp']} — {latest['litter_label']}",
-                use_column_width=True,
-            )
-
-    render_snapshot()
+        st.markdown("### 📸 Latest Snapshot")
+        snap_events = st.session_state.dump_events
+        if not snap_events:
+            st.caption("Snapshots appear here when a dumping event is detected.")
+        else:
+            latest = snap_events[-1]
+            snap_path = latest.get("snapshot_path")
+            if snap_path and Path(snap_path).exists():
+                img = Image.open(snap_path)
+                st.image(img,
+                         caption=f"Event at {latest['timestamp']} — {latest['litter_label']}",
+                         use_column_width=True)
 
 
-# ─────────────────────────────────────────────
-#  Detection loop
-# ─────────────────────────────────────────────
-
-if st.session_state.running:
-    cam    = st.session_state.camera
-    det    = st.session_state.detector
-    conf   = st.session_state.confidence
-
-    if cam is None or not cam.is_connected:
-        st.error("Camera disconnected.")
-        st.session_state.running = False
-        st.rerun()
-
-    frame = cam.read()
-    if frame is None:
-        st.warning("Waiting for first frame…")
-        time.sleep(0.2)
-        st.rerun()
-
-    # ── Run inference
-    annotated, litter_dets, person_dets, dump_event = det.process_frame(
-        frame, confidence_override=conf
-    )
-
-    # ── Display frame
-    frame_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-    feed_placeholder.image(frame_rgb, use_column_width=True, channels="RGB")
-
-    # ── Update status
-    dump_occurred = dump_event is not None
-    render_status(len(litter_dets), len(person_dets), dump_occurred)
-
-    # ── Log detections
-    ts = time.strftime("%H:%M:%S")
-    for l in litter_dets:
-        st.session_state.log_entries.append([ts, "litter", l.label, f"{l.confidence:.0%}"])
-        st.session_state.stat_litter += 1
-        event_logger.log_detection(l.label, l.confidence, "litter")
-
-    for p in person_dets:
-        st.session_state.log_entries.append([ts, "person", p.label, f"{p.confidence:.0%}"])
-        st.session_state.stat_persons += 1
-        event_logger.log_detection(p.label, p.confidence, "person")
-
-    # Trim log
-    if len(st.session_state.log_entries) > MAX_LOG_ENTRIES:
-        st.session_state.log_entries = st.session_state.log_entries[-MAX_LOG_ENTRIES:]
-
-    # ── Handle dump event
-    if dump_occurred:
-        ev_dict = {
-            "timestamp":    dump_event.timestamp,
-            "litter_label": dump_event.litter_label,
-            "person_conf":  dump_event.person_conf,
-            "litter_conf":  dump_event.litter_conf,
-            "snapshot_path": dump_event.snapshot_path,
-        }
-        st.session_state.dump_events.append(ev_dict)
-        st.session_state.stat_incidents += 1
-        st.session_state.log_entries.append(
-            [dump_event.timestamp, "⚠ DUMP", dump_event.litter_label, "EVENT"])
-
-        event_logger.log_incident(
-            dump_event.timestamp, dump_event.litter_label,
-            dump_event.snapshot_path, dump_event.person_conf, dump_event.litter_conf,
-        )
-
-        # Fire alerts (non-blocking — runs in background thread)
-        import threading
-        threading.Thread(
-            target=dispatch_alerts,
-            args=(dump_event.timestamp, dump_event.litter_label, dump_event.snapshot_path),
-            daemon=True,
-        ).start()
-
-    # ── Refresh stats + panels
-    render_stats()
-    render_log()
-    render_incidents()
-    render_snapshot()
-
-    # ── Loop
-    time.sleep(0.05)
-    st.rerun()
+_live_view()

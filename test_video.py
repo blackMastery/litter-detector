@@ -177,7 +177,7 @@ def run_test(video_path: str, show: bool, slow: bool,
     print()
 
     # ── Load model ────────────────────────────
-    print(f"  Loading YOLOv8 model…", end=" ", flush=True)
+    print(f"  Loading YOLO11 model…", end=" ", flush=True)
     detector = LitterDetector()
     print(g("done"))
     print()
@@ -351,8 +351,8 @@ Examples:
                         help="Slow-motion playback (3× slower) in --show mode")
     parser.add_argument("--confidence",     type=float, default=CONFIDENCE_THRESHOLD,
                         help=f"Detection confidence 0.0–1.0 (default: {CONFIDENCE_THRESHOLD})")
-    parser.add_argument("--skip",           type=int,   default=3,
-                        help="Process every Nth frame (default: 3, use 1 for every frame)")
+    parser.add_argument("--skip",           type=int,   default=2,
+                        help="Process every Nth frame (default: 2, use 1 for every frame)")
     parser.add_argument("--max-frames",     type=int,   default=0,
                         help="Stop after N frames (0 = process entire video)")
     parser.add_argument("--download-sample", action="store_true",

@@ -30,7 +30,8 @@ class CameraStream:
         cam.stop()
     """
 
-    def __init__(self):
+    def __init__(self, source=None):
+        self._source_override = source
         self._cap: Optional[cv2.VideoCapture] = None
         self._frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
@@ -108,6 +109,8 @@ class CameraStream:
     # ── Internal ──────────────────────────────
 
     def _get_source(self):
+        if self._source_override is not None:
+            return self._source_override
         if TEST_VIDEO_PATH:
             return TEST_VIDEO_PATH
         if USE_WEBCAM:

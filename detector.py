@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────
-#  detector.py  —  YOLO inference + dumping logic
+#  detector.py  —  YOLO11 inference + dumping logic
 # ─────────────────────────────────────────────
 
 import cv2
@@ -12,11 +12,16 @@ from typing import Optional
 import logging
 
 from config import (
-    MODEL_PATH, CONFIDENCE_THRESHOLD,
+    GARBAGE_MODEL_PATH, PERSON_MODEL_PATH, CONFIDENCE_THRESHOLD,
     LITTER_CLASSES, PERSON_CLASS,
     PROXIMITY_THRESHOLD, DUMP_COOLDOWN_SECONDS,
     SNAPSHOT_DIR, JPEG_QUALITY,
+    PREPROCESS_CLAHE, CLAHE_CLIP_LIMIT, CLAHE_TILE_SIZE,
+    GROUND_FILTER_ENABLED, GROUND_ZONE_RATIO,
+    PILE_DETECTION_ENABLED, PILE_CLUSTER_DIST, PILE_MIN_ITEMS,
+    TRACKER_MAX_ABSENT,
 )
+from tracker import ObjectTracker
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,7 +39,9 @@ class Detection:
     y1: int
     x2: int
     y2: int
-    timestamp: str = field(default_factory=lambda: time.strftime("%H:%M:%S"))
+    timestamp: str       = field(default_factory=lambda: time.strftime("%H:%M:%S"))
+    track_id: Optional[int] = field(default=None)
+    is_new: bool            = field(default=True)
 
     @property
     def center(self):
@@ -61,14 +68,67 @@ class DumpEvent:
 
 class LitterDetector:
     def __init__(self):
-        logger.info(f"Loading model: {MODEL_PATH}")
-        self.model = YOLO(MODEL_PATH)
+        logger.info(f"Loading garbage model: {GARBAGE_MODEL_PATH}")
+        self.garbage_model = YOLO(GARBAGE_MODEL_PATH)
+        logger.info(f"Loading person model: {PERSON_MODEL_PATH}")
+        self.person_model = YOLO(PERSON_MODEL_PATH)
         self._last_dump_time = 0
         self._frame_count = 0
-        logger.info("Model loaded.")
+        self._clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_SIZE)
+        self._tracker = ObjectTracker(max_absent=TRACKER_MAX_ABSENT)
+        logger.info("Both models loaded.")
 
     def _euclidean(self, c1, c2) -> float:
         return float(np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2))
+
+    def _clahe_enhance(self, frame: np.ndarray) -> np.ndarray:
+        """Apply CLAHE on the L channel (LAB) to improve contrast in dark frames."""
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l_eq = self._clahe.apply(l)
+        return cv2.cvtColor(cv2.merge([l_eq, a, b]), cv2.COLOR_LAB2BGR)
+
+    def _is_on_ground(self, det: Detection, frame_height: int) -> bool:
+        """Return True if the detection's bottom edge is in the ground zone."""
+        return det.y2 >= frame_height * GROUND_ZONE_RATIO
+
+    def _find_piles(self, dets: list[Detection]) -> list[list[Detection]]:
+        """
+        Group detections into piles using greedy distance clustering.
+        Returns only groups that meet PILE_MIN_ITEMS threshold.
+        """
+        if not dets:
+            return []
+        assigned = [False] * len(dets)
+        piles = []
+        for i, anchor in enumerate(dets):
+            if assigned[i]:
+                continue
+            group = [anchor]
+            assigned[i] = True
+            for j, candidate in enumerate(dets):
+                if assigned[j]:
+                    continue
+                if self._euclidean(anchor.center, candidate.center) < PILE_CLUSTER_DIST:
+                    group.append(candidate)
+                    assigned[j] = True
+            if len(group) >= PILE_MIN_ITEMS:
+                piles.append(group)
+        return piles
+
+    def _draw_pile(self, frame: np.ndarray, pile: list[Detection]):
+        """Draw a single encompassing box around a garbage pile."""
+        x1 = min(d.x1 for d in pile)
+        y1 = min(d.y1 for d in pile)
+        x2 = max(d.x2 for d in pile)
+        y2 = max(d.y2 for d in pile)
+        color = (0, 200, 80)   # BGR green
+        cv2.rectangle(frame, (x1 - 6, y1 - 6), (x2 + 6, y2 + 6), color, 3)
+        label = f"GARBAGE PILE  ({len(pile)} items)"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+        cv2.rectangle(frame, (x1 - 6, y1 - th - 18), (x1 + tw + 4, y1 - 6), color, -1)
+        cv2.putText(frame, label, (x1 - 2, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
     def _is_dumping(self, person: Detection, litter: Detection) -> bool:
         return self._euclidean(person.center, litter.center) < PROXIMITY_THRESHOLD
@@ -82,7 +142,8 @@ class LitterDetector:
     def _draw_box(self, frame, det: Detection, color, thickness=2):
         x1, y1, x2, y2 = det.x1, det.y1, det.x2, det.y2
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-        label_text = f"{det.label} {det.confidence:.0%}"
+        tid_str = f" #{det.track_id}" if det.track_id is not None else ""
+        label_text = f"{det.label}{tid_str} {det.confidence:.0%}"
         (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
         cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), color, -1)
         cv2.putText(frame, label_text, (x1 + 3, y1 - 4),
@@ -116,21 +177,43 @@ class LitterDetector:
         self._frame_count += 1
         conf = confidence_override if confidence_override is not None else CONFIDENCE_THRESHOLD
 
-        results = self.model(frame, conf=conf, verbose=False)[0]
+        if PREPROCESS_CLAHE:
+            frame = self._clahe_enhance(frame)
 
+        frame_h = frame.shape[0]
         litter_dets: list[Detection] = []
         person_dets: list[Detection] = []
 
-        for box in results.boxes:
-            label = self.model.names[int(box.cls)]
+        # ── Garbage model: only "garbage" class detections
+        garbage_results = self.garbage_model(frame, conf=conf, verbose=False)[0]
+        for box in garbage_results.boxes:
+            label = self.garbage_model.names[int(box.cls)]
+            if label not in LITTER_CLASSES:
+                continue
             confidence = float(box.conf)
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             det = Detection(label, confidence, x1, y1, x2, y2)
+            if GROUND_FILTER_ENABLED and not self._is_on_ground(det, frame_h):
+                continue
+            litter_dets.append(det)
 
-            if label in LITTER_CLASSES:
-                litter_dets.append(det)
-            elif label == PERSON_CLASS:
-                person_dets.append(det)
+        # ── Person model: only "person" class detections
+        person_results = self.person_model(frame, conf=conf, verbose=False)[0]
+        for box in person_results.boxes:
+            label = self.person_model.names[int(box.cls)]
+            if label != PERSON_CLASS:
+                continue
+            confidence = float(box.conf)
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            person_dets.append(Detection(label, confidence, x1, y1, x2, y2))
+
+        # ── Track objects across frames; sets track_id and is_new on each Detection
+        self._tracker.update(litter_dets + person_dets, self._frame_count)
+
+        # ── Draw pile boxes (green) before individual boxes so they sit underneath
+        if PILE_DETECTION_ENABLED:
+            for pile in self._find_piles(litter_dets):
+                self._draw_pile(frame, pile)
 
         # ── Draw litter boxes (amber)
         for det in litter_dets:
@@ -170,3 +253,6 @@ class LitterDetector:
                     (200, 200, 200), 1, cv2.LINE_AA)
 
         return frame, litter_dets, person_dets, dump_event
+
+    def reset_tracker(self):
+        self._tracker.reset()
