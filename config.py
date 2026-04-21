@@ -89,4 +89,6 @@ STREAM_FPS_LIMIT = 15   # target FPS for Streamlit display (lower = less CPU)
 JPEG_QUALITY = 80       # snapshot JPEG quality 1-100
 
 # ── Object Tracking ───────────────────────────
-TRACKER_MAX_ABSENT = 15   # frames before a track is pruned (~1.5 s at 10 FPS)
+TRACKER_MAX_ABSENT    = 15   # frames before a track is pruned (~1.5 s at 10 FPS)
+PERSON_HISTORY_FRAMES = 30   # frames of person positions kept for dump detection (~3 s at 10 FPS)
+MIN_PROXIMITY_FRAMES  = 8    # person must be within threshold for this many frames to count as dumping (~0.8 s)

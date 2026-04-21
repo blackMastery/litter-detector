@@ -6,6 +6,7 @@ import cv2
 import time
 import os
 import numpy as np
+from collections import deque
 from ultralytics import YOLO
 from dataclasses import dataclass, field
 from typing import Optional
@@ -19,7 +20,7 @@ from config import (
     PREPROCESS_CLAHE, CLAHE_CLIP_LIMIT, CLAHE_TILE_SIZE,
     GROUND_FILTER_ENABLED, GROUND_ZONE_RATIO,
     PILE_DETECTION_ENABLED, PILE_CLUSTER_DIST, PILE_MIN_ITEMS,
-    TRACKER_MAX_ABSENT, CAMERA_NAME,
+    TRACKER_MAX_ABSENT, PERSON_HISTORY_FRAMES, MIN_PROXIMITY_FRAMES, CAMERA_NAME,
 )
 from tracker import ObjectTracker
 
@@ -76,6 +77,7 @@ class LitterDetector:
         self._frame_count = 0
         self._clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_SIZE)
         self._tracker = ObjectTracker(max_absent=TRACKER_MAX_ABSENT)
+        self._person_pos_history: deque = deque(maxlen=PERSON_HISTORY_FRAMES)
         logger.info("Both models loaded.")
 
     def _euclidean(self, c1, c2) -> float:
@@ -130,8 +132,12 @@ class LitterDetector:
         cv2.putText(frame, label, (x1 - 2, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
-    def _is_dumping(self, person: Detection, litter: Detection) -> bool:
-        return self._euclidean(person.center, litter.center) < PROXIMITY_THRESHOLD
+    def _person_proximity_frames(self, litter: Detection) -> int:
+        """Count how many recent frames had at least one person within PROXIMITY_THRESHOLD of litter."""
+        return sum(
+            1 for frame_cents in self._person_pos_history
+            if any(self._euclidean(c, litter.center) < PROXIMITY_THRESHOLD for c in frame_cents)
+        )
 
     def _save_snapshot(self, frame: np.ndarray) -> str:
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -219,30 +225,47 @@ class LitterDetector:
         for det in litter_dets:
             self._draw_box(frame, det, (30, 165, 240))   # BGR amber
 
-        # ── Check dumping + draw person boxes
+        # ── Record current person positions before dump check (includes this frame)
+        self._person_pos_history.append([p.center for p in person_dets])
+
+        # ── Detect dumps: a NEW litter track that appeared near a person
         dump_event: Optional[DumpEvent] = None
         now = time.time()
         cooldown_ok = (now - self._last_dump_time) > DUMP_COOLDOWN_SECONDS
+        dumping_person_idxs: set[int] = set()
 
-        for person in person_dets:
-            dumping = any(self._is_dumping(person, l) for l in litter_dets)
+        for litter in litter_dets:
+            if not litter.is_new:
+                continue
+            if self._person_proximity_frames(litter) < MIN_PROXIMITY_FRAMES:
+                continue
+            # Which current-frame persons are close (for box colouring)
+            near = [
+                i for i, p in enumerate(person_dets)
+                if self._euclidean(p.center, litter.center) < PROXIMITY_THRESHOLD
+            ]
+            dumping_person_idxs.update(near)
+            if cooldown_ok and dump_event is None:
+                self._last_dump_time = now
+                snap_path = self._save_snapshot(frame)
+                p_conf = (
+                    person_dets[min(near, key=lambda i: self._euclidean(
+                        person_dets[i].center, litter.center))].confidence
+                    if near else 0.0
+                )
+                dump_event = DumpEvent(
+                    timestamp=time.strftime("%H:%M:%S"),
+                    snapshot_path=snap_path,
+                    litter_label=litter.label,
+                    person_conf=p_conf,
+                    litter_conf=litter.confidence,
+                )
 
-            if dumping:
-                self._draw_box(frame, person, (0, 80, 220), thickness=2)  # red-tinted
+        # ── Draw person boxes
+        for i, person in enumerate(person_dets):
+            if i in dumping_person_idxs:
+                self._draw_box(frame, person, (0, 80, 220), thickness=2)
                 self._draw_dump_alert(frame, person)
-
-                if cooldown_ok and dump_event is None:
-                    self._last_dump_time = now
-                    snap_path = self._save_snapshot(frame)
-                    closest = min(litter_dets,
-                                  key=lambda l: self._euclidean(person.center, l.center))
-                    dump_event = DumpEvent(
-                        timestamp=time.strftime("%H:%M:%S"),
-                        snapshot_path=snap_path,
-                        litter_label=closest.label,
-                        person_conf=person.confidence,
-                        litter_conf=closest.confidence,
-                    )
             else:
                 self._draw_box(frame, person, (220, 130, 50))  # BGR blue
 
@@ -256,3 +279,4 @@ class LitterDetector:
 
     def reset_tracker(self):
         self._tracker.reset()
+        self._person_pos_history.clear()
