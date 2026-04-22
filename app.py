@@ -9,7 +9,6 @@ import time
 import numpy as np
 from PIL import Image
 from pathlib import Path
-import io
 
 from detector import LitterDetector, DumpEvent
 from camera import CameraStream
@@ -107,6 +106,43 @@ _init_state()
 
 
 # ─────────────────────────────────────────────
+#  Cached file helpers
+# ─────────────────────────────────────────────
+
+@st.cache_data(ttl=60)
+def _list_snapshots(snap_dir: str) -> list[tuple[str, str]]:
+    files = sorted(
+        Path(snap_dir).glob("*.jpg"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return [(str(f), f.stem) for f in files]
+
+@st.cache_data(ttl=30)
+def _list_recordings(rec_dir: str) -> list[str]:
+    files = sorted(
+        Path(rec_dir).glob("*.mp4"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return [f.name for f in files]
+
+@st.cache_data(ttl=30)
+def _list_test_footage(footage_dir: str) -> list[str]:
+    p = Path(footage_dir)
+    if not p.exists():
+        return []
+    return sorted(f.name for f in p.glob("*.mp4"))
+
+@st.cache_data(ttl=30)
+def _read_incidents_csv_bytes(csv_path: str) -> bytes | None:
+    p = Path(csv_path)
+    if not p.exists():
+        return None
+    return p.read_bytes()
+
+
+# ─────────────────────────────────────────────
 #  Sidebar
 # ─────────────────────────────────────────────
 
@@ -123,8 +159,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🎬 Video Source")
-    _test_footage = sorted(Path("test_footage").glob("*.mp4"))
-    _source_options = ["🎥 Live Camera (RTSP/Webcam)"] + [f.name for f in _test_footage]
+    _source_options = ["🎥 Live Camera (RTSP/Webcam)"] + _list_test_footage("test_footage")
     _selected = st.selectbox(
         "Source", _source_options,
         disabled=st.session_state.running,
@@ -166,21 +201,20 @@ with st.sidebar:
             st.session_state.recording = False
         st.caption(f"Saving to `{Path(st.session_state.recording_path).name}`" if st.session_state.recording_path else "Initialising…")
 
-    _rec_files = sorted(Path(RECORDING_DIR).glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if _rec_files:
-        _chosen = st.selectbox("Download recording", [p.name for p in _rec_files], label_visibility="collapsed")
+    _rec_names = _list_recordings(RECORDING_DIR)
+    if _rec_names:
+        _chosen = st.selectbox("Download recording", _rec_names, label_visibility="collapsed")
         _rec_path = Path(RECORDING_DIR) / _chosen
-        with open(_rec_path, "rb") as _f:
-            st.download_button("📥 Download", _f, _chosen, "video/mp4", use_container_width=True)
+        st.download_button("📥 Download", data=lambda p=_rec_path: p.read_bytes(),
+                           file_name=_chosen, mime="video/mp4", use_container_width=True)
 
     st.markdown("---")
     st.markdown("### 📁 Export")
 
-    incidents_csv = Path(LOG_DIR) / "incidents.csv"
-    if incidents_csv.exists():
-        with open(incidents_csv, "rb") as f:
-            st.download_button("📥 Incidents", f, "incidents.csv", "text/csv",
-                               use_container_width=True)
+    _incidents_bytes = _read_incidents_csv_bytes(str(Path(LOG_DIR) / "incidents.csv"))
+    if _incidents_bytes is not None:
+        st.download_button("📥 Incidents", data=_incidents_bytes,
+                           file_name="incidents.csv", mime="text/csv", use_container_width=True)
     else:
         st.button("📥 Incidents", disabled=True, use_container_width=True)
 
@@ -429,19 +463,13 @@ _live_view()
 st.markdown("---")
 st.markdown("### 📸 Snapshot Gallery")
 
-_snap_files = sorted(
-    Path(SNAPSHOT_DIR).glob("*.jpg"),
-    key=lambda p: p.stat().st_mtime,
-    reverse=True,
-)
-
-if not _snap_files:
+_snap_items = _list_snapshots(SNAPSHOT_DIR)
+if not _snap_items:
     st.caption("No snapshots yet. Snapshots are saved automatically when a dumping event is detected.")
 else:
     _cols_per_row = 4
-    for i in range(0, len(_snap_files), _cols_per_row):
-        _row = _snap_files[i:i + _cols_per_row]
-        for col, snap in zip(st.columns(_cols_per_row), _row):
+    for i in range(0, len(_snap_items), _cols_per_row):
+        _row = _snap_items[i:i + _cols_per_row]
+        for col, (snap_path_str, snap_stem) in zip(st.columns(_cols_per_row), _row):
             with col:
-                img = Image.open(snap)
-                st.image(img, use_container_width=True, caption=snap.stem)
+                st.image(Path(snap_path_str), use_container_width=True, caption=snap_stem)
