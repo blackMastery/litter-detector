@@ -7,7 +7,6 @@ import streamlit as st
 import cv2
 import time
 import numpy as np
-import pandas as pd
 from PIL import Image
 from pathlib import Path
 import io
@@ -19,7 +18,7 @@ import logger as event_logger
 from config import (
     CONFIDENCE_THRESHOLD, SNAPSHOT_DIR, LOG_DIR, RECORDING_DIR,
     ENABLE_EMAIL_ALERTS, ENABLE_SMS_ALERTS,
-    MAX_LOG_ENTRIES, CAMERA_NAME,
+    CAMERA_NAME,
 )
 
 import os
@@ -75,8 +74,6 @@ st.markdown("""
 [data-testid="stMetric"] label { font-size: 12px !important; }
 [data-testid="stMetricValue"] { font-size: 26px !important; }
 
-/* Scrollable log */
-.log-table { max-height: 300px; overflow-y: auto; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -90,7 +87,6 @@ def _init_state():
         "running":          False,
         "detector":         None,
         "camera":           None,
-        "log_entries":      [],
         "dump_events":      [],
         "stat_litter":      0,
         "stat_persons":     0,
@@ -180,22 +176,13 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📁 Export")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        incidents_csv = Path(LOG_DIR) / "incidents.csv"
-        if incidents_csv.exists():
-            with open(incidents_csv, "rb") as f:
-                st.download_button("📥 Incidents", f, "incidents.csv", "text/csv")
-        else:
-            st.button("📥 Incidents", disabled=True)
-
-    with col_b:
-        detections_csv = Path(LOG_DIR) / "detections.csv"
-        if detections_csv.exists():
-            with open(detections_csv, "rb") as f:
-                st.download_button("📥 Detections", f, "detections.csv", "text/csv")
-        else:
-            st.button("📥 Detections", disabled=True)
+    incidents_csv = Path(LOG_DIR) / "incidents.csv"
+    if incidents_csv.exists():
+        with open(incidents_csv, "rb") as f:
+            st.download_button("📥 Incidents", f, "incidents.csv", "text/csv",
+                               use_container_width=True)
+    else:
+        st.button("📥 Incidents", disabled=True, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### ℹ️ System")
@@ -254,8 +241,7 @@ with col_btn1:
             st.rerun()
 
 with col_btn2:
-    if st.button("🗑 Clear logs", use_container_width=True):
-        st.session_state.log_entries   = []
+    if st.button("🗑 Reset", use_container_width=True):
         st.session_state.dump_events   = []
         st.session_state.stat_litter   = 0
         st.session_state.stat_persons  = 0
@@ -310,22 +296,12 @@ def _live_view():
                         st.session_state.recording_path = rec_path
                     st.session_state.recorder.write(annotated)
 
-                ts = time.strftime("%H:%M:%S")
                 for l in litter_dets:
-                    st.session_state.log_entries.append(
-                        [ts, "litter", l.label, f"{l.confidence:.0%}"])
                     if l.is_new:
                         st.session_state.stat_litter += 1
-                        event_logger.log_detection(l.label, l.confidence, "litter")
                 for p in person_dets:
-                    st.session_state.log_entries.append(
-                        [ts, "person", p.label, f"{p.confidence:.0%}"])
                     if p.is_new:
                         st.session_state.stat_persons += 1
-                        event_logger.log_detection(p.label, p.confidence, "person")
-                if len(st.session_state.log_entries) > MAX_LOG_ENTRIES:
-                    st.session_state.log_entries = (
-                        st.session_state.log_entries[-MAX_LOG_ENTRIES:])
                 if dump_event:
                     ev_dict = {
                         "timestamp":     dump_event.timestamp,
@@ -336,9 +312,6 @@ def _live_view():
                     }
                     st.session_state.dump_events.append(ev_dict)
                     st.session_state.stat_incidents += 1
-                    st.session_state.log_entries.append(
-                        [dump_event.timestamp, "⚠ DUMP",
-                         dump_event.litter_label, "EVENT"])
                     event_logger.log_incident(
                         dump_event.timestamp, dump_event.litter_label,
                         dump_event.snapshot_path,
@@ -392,29 +365,19 @@ def _live_view():
         st.markdown("### 📹 Live Feed")
         if annotated is not None:
             frame_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-            st.image(frame_rgb, use_column_width=True, channels="RGB")
+            st.image(frame_rgb, use_container_width=True, channels="RGB")
         else:
             st.info("Press **▶ Start** to connect to the camera.")
 
         st.markdown("### 📊 Session Stats")
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3 = st.columns(3)
         _uptime = ""
         if st.session_state.session_start:
             _secs = int(time.time() - st.session_state.session_start)
             _uptime = f"{_secs//60:02d}:{_secs%60:02d}"
         m1.metric("Litter items",  st.session_state.stat_litter)
-        m2.metric("Persons",       st.session_state.stat_persons)
-        m3.metric("🚨 Incidents",  st.session_state.stat_incidents)
-        m4.metric("Uptime",        _uptime or "—")
-
-        st.markdown("### 📋 Detection Log")
-        _entries = st.session_state.log_entries[-50:][::-1]
-        if not _entries:
-            st.caption("No detections yet.")
-        else:
-            _df = pd.DataFrame(_entries, columns=["Time", "Type", "Label", "Confidence"])
-            st.dataframe(_df, use_container_width=True, hide_index=True,
-                         height=min(300, len(_df) * 35 + 38))
+        m2.metric("🚨 Incidents",  st.session_state.stat_incidents)
+        m3.metric("Uptime",        _uptime or "—")
 
     # ── Right panel ───────────────────────────
     with right_col:
@@ -453,7 +416,32 @@ def _live_view():
                 img = Image.open(snap_path)
                 st.image(img,
                          caption=f"Event at {latest['timestamp']} — {latest['litter_label']}",
-                         use_column_width=True)
+                         use_container_width=True)
 
 
 _live_view()
+
+
+# ─────────────────────────────────────────────
+#  Snapshot Gallery
+# ─────────────────────────────────────────────
+
+st.markdown("---")
+st.markdown("### 📸 Snapshot Gallery")
+
+_snap_files = sorted(
+    Path(SNAPSHOT_DIR).glob("*.jpg"),
+    key=lambda p: p.stat().st_mtime,
+    reverse=True,
+)
+
+if not _snap_files:
+    st.caption("No snapshots yet. Snapshots are saved automatically when a dumping event is detected.")
+else:
+    _cols_per_row = 4
+    for i in range(0, len(_snap_files), _cols_per_row):
+        _row = _snap_files[i:i + _cols_per_row]
+        for col, snap in zip(st.columns(_cols_per_row), _row):
+            with col:
+                img = Image.open(snap)
+                st.image(img, use_container_width=True, caption=snap.stem)
