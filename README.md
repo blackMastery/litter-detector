@@ -100,16 +100,19 @@ Live RTSP frame
 
 ## Enabling Alerts
 
-### Email (Gmail)
-1. Enable 2FA on your Gmail account
-2. Generate an App Password: Google Account → Security → App Passwords
-3. Set in `config.py`:
+### Email (Resend)
+1. Create a Resend account and generate an API key
+2. Verify your sending domain/address in Resend
+3. Set environment variables (for example in `.env`):
+   ```bash
+   RESEND_API_KEY=re_xxxxxxxxxxxxxxxxx
+   RESEND_FROM_EMAIL=alerts@yourdomain.com
+   ```
+4. In `config.py`, enable email alerts:
    ```python
    ENABLE_EMAIL_ALERTS = True
-   SMTP_USER  = "your@gmail.com"
-   SMTP_PASS  = "your_16_char_app_password"
-   ALERT_RECIPIENT = "supervisor@yourorg.com"
    ```
+5. In the app sidebar under **Alerts**, enter recipient emails (comma/newline separated)
 
 ### SMS (Twilio)
 1. Create a free Twilio account at twilio.com

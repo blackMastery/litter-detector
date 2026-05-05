@@ -2,20 +2,27 @@
 #  alerts.py  —  Email + SMS notifications
 # ─────────────────────────────────────────────
 
-import smtplib
+import base64
 import logging
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
 from pathlib import Path
 from typing import Optional
 
+try:
+    import resend
+except ImportError:  # pragma: no cover - handled at runtime
+    resend = None
+
+import supabase_client
 from config import (
-    ENABLE_EMAIL_ALERTS, SMTP_HOST, SMTP_PORT,
-    SMTP_USER, SMTP_PASS, ALERT_RECIPIENT,
+    ENABLE_EMAIL_ALERTS,
+    RESEND_API_KEY,
+    RESEND_FROM_EMAIL,
     ENABLE_SMS_ALERTS,
-    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
-    TWILIO_FROM, TWILIO_TO, CAMERA_NAME,
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_FROM,
+    TWILIO_TO,
+    CAMERA_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,20 +31,53 @@ logger = logging.getLogger(__name__)
 def send_email_alert(
     timestamp: str,
     litter_label: str,
+    recipients: list[str],
     snapshot_path: Optional[str] = None,
+    enabled_override: Optional[bool] = None,
 ) -> bool:
     """
     Send email alert with optional snapshot attachment.
     Returns True on success.
     """
-    if not ENABLE_EMAIL_ALERTS:
+    email_enabled = ENABLE_EMAIL_ALERTS if enabled_override is None else enabled_override
+    if not email_enabled:
+        supabase_client.log_email_attempt(
+            litter_label=litter_label,
+            recipients=recipients,
+            status="skipped",
+            error_message="email alerts disabled",
+        )
+        return False
+    if resend is None:
+        logger.warning("Email alert skipped: resend package is not installed")
+        supabase_client.log_email_attempt(
+            litter_label=litter_label,
+            recipients=recipients,
+            status="skipped",
+            error_message="resend package is not installed",
+        )
+        return False
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL:
+        logger.warning("Email alert skipped: RESEND_API_KEY / RESEND_FROM_EMAIL not configured")
+        supabase_client.log_email_attempt(
+            litter_label=litter_label,
+            recipients=recipients,
+            status="skipped",
+            error_message="RESEND_API_KEY / RESEND_FROM_EMAIL not configured",
+        )
+        return False
+    if not recipients:
+        logger.warning("Email alert skipped: no recipient emails configured")
+        supabase_client.log_email_attempt(
+            litter_label=litter_label,
+            recipients=recipients,
+            status="skipped",
+            error_message="no recipient emails configured",
+        )
         return False
 
     try:
-        msg = MIMEMultipart()
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_RECIPIENT
-        msg["Subject"] = f"[ALERT] Dumping detected — {timestamp}"
+        resend.api_key = RESEND_API_KEY
 
         body = f"""
         <html><body>
@@ -50,34 +90,57 @@ def send_email_alert(
         <p>A snapshot has been saved and attached to this email.</p>
         </body></html>
         """
-        msg.attach(MIMEText(body, "html"))
+        params: resend.Emails.SendParams = {
+            "from": RESEND_FROM_EMAIL,
+            "to": recipients,
+            "subject": f"[ALERT] Dumping detected - {timestamp}",
+            "html": body,
+        }
 
         if snapshot_path and Path(snapshot_path).exists():
-            with open(snapshot_path, "rb") as f:
-                img = MIMEImage(f.read(), name=Path(snapshot_path).name)
-                img.add_header("Content-Disposition", "attachment",
-                               filename=Path(snapshot_path).name)
-                msg.attach(img)
+            encoded = base64.b64encode(Path(snapshot_path).read_bytes()).decode("utf-8")
+            params["attachments"] = [
+                {
+                    "filename": Path(snapshot_path).name,
+                    "content": encoded,
+                }
+            ]
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, ALERT_RECIPIENT, msg.as_string())
-
-        logger.info(f"Email alert sent to {ALERT_RECIPIENT}")
+        response = resend.Emails.send(params)
+        provider_message_id = ""
+        if isinstance(response, dict):
+            provider_message_id = str(response.get("id") or "")
+        supabase_client.log_email_attempt(
+            litter_label=litter_label,
+            recipients=recipients,
+            status="sent",
+            provider_message_id=provider_message_id,
+        )
+        logger.info("Email alert sent to %s", ", ".join(recipients))
         return True
 
     except Exception as e:
-        logger.error(f"Email alert failed: {e}")
+        logger.error("Email alert failed: %s", e)
+        supabase_client.log_email_attempt(
+            litter_label=litter_label,
+            recipients=recipients,
+            status="failed",
+            error_message=str(e),
+        )
         return False
 
 
-def send_sms_alert(timestamp: str, litter_label: str) -> bool:
+def send_sms_alert(
+    timestamp: str,
+    litter_label: str,
+    enabled_override: Optional[bool] = None,
+) -> bool:
     """
     Send SMS alert via Twilio.
     Returns True on success.
     """
-    if not ENABLE_SMS_ALERTS:
+    sms_enabled = ENABLE_SMS_ALERTS if enabled_override is None else enabled_override
+    if not sms_enabled:
         return False
 
     try:
@@ -104,10 +167,26 @@ def send_sms_alert(timestamp: str, litter_label: str) -> bool:
         return False
 
 
-def dispatch_alerts(timestamp: str, litter_label: str,
-                    snapshot_path: Optional[str] = None) -> dict:
+def dispatch_alerts(
+    timestamp: str,
+    litter_label: str,
+    recipients: list[str],
+    snapshot_path: Optional[str] = None,
+    enable_email: Optional[bool] = None,
+    enable_sms: Optional[bool] = None,
+) -> dict:
     """Fire all enabled alert channels. Returns status dict."""
     return {
-        "email": send_email_alert(timestamp, litter_label, snapshot_path),
-        "sms":   send_sms_alert(timestamp, litter_label),
+        "email": send_email_alert(
+            timestamp,
+            litter_label,
+            recipients,
+            snapshot_path,
+            enabled_override=enable_email,
+        ),
+        "sms": send_sms_alert(
+            timestamp,
+            litter_label,
+            enabled_override=enable_sms,
+        ),
     }

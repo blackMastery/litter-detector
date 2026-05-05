@@ -11,6 +11,7 @@ pandas>=2.2.0
 
 # Alerts (optional — only needed if enabled in config.py)
 twilio>=8.0.0             # SMS alerts
+resend>=2.0.0             # Email alerts via Resend API
 
 # Config / secrets
 python-dotenv>=1.0.0      # load credentials from .env instead of config.py

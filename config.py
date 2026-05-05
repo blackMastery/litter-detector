@@ -65,12 +65,9 @@ PROXIMITY_THRESHOLD = 150
 DUMP_COOLDOWN_SECONDS = 10
 
 # ── Alerts ────────────────────────────────────
-ENABLE_EMAIL_ALERTS = False
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USER          = os.getenv("SMTP_USER", "")
-SMTP_PASS          = os.getenv("SMTP_PASS", "")
-ALERT_RECIPIENT    = os.getenv("ALERT_RECIPIENT", "")
+ENABLE_EMAIL_ALERTS = True
+RESEND_API_KEY      = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL   = os.getenv("RESEND_FROM_EMAIL", "")
 
 ENABLE_SMS_ALERTS = False
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -93,7 +90,14 @@ SUPABASE_RECORDING_BUCKET = "recordings"
 SUPABASE_UPLOADS_BUCKET   = "uploads"
 
 # ── Display ───────────────────────────────────
-STREAM_FPS_LIMIT = 15   # target FPS for Streamlit display (lower = less CPU)
+# Max rate the camera thread pulls frames (OpenCV read loop). Higher = smoother motion;
+# CPU/GPU must still keep up with dual YOLO inference in the live fragment.
+STREAM_FPS_LIMIT = 30
+
+# How often the live-view fragment redraws (1 / LIVE_VIEW_TARGET_FPS seconds).
+# Effective FPS is still limited by inference time when detection is running.
+LIVE_VIEW_TARGET_FPS = 24
+
 JPEG_QUALITY = 80       # snapshot JPEG quality 1-100
 
 # ── Object Tracking ───────────────────────────

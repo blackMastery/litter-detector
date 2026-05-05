@@ -225,3 +225,109 @@ def list_cloud_snapshots(limit: int = 48) -> list[dict]:
             }
         )
     return out
+
+
+def load_email_recipients() -> list[str]:
+    """Load persisted email recipients for the current camera."""
+    client = get_client()
+    if client is None:
+        return []
+    try:
+        cam_id = get_camera_id()
+        if not cam_id:
+            return []
+        res = (
+            client.table("notification_settings")
+            .select("email_recipients")
+            .eq("camera_id", cam_id)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return []
+        recipients = res.data[0].get("email_recipients") or []
+        if not isinstance(recipients, list):
+            return []
+        return [str(r).strip() for r in recipients if str(r).strip()]
+    except Exception as e:
+        logger.warning(f"Load recipients failed: {e}")
+        return []
+
+
+def save_email_recipients(recipients: list[str]) -> bool:
+    """Persist email recipients for the current camera."""
+    client = get_client()
+    if client is None:
+        return False
+    try:
+        cam_id = get_camera_id()
+        if not cam_id:
+            return False
+        cleaned = [str(r).strip() for r in recipients if str(r).strip()]
+        client.table("notification_settings").upsert(
+            {
+                "camera_id": cam_id,
+                "email_recipients": cleaned,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="camera_id",
+        ).execute()
+        return True
+    except Exception as e:
+        logger.warning(f"Save recipients failed: {e}")
+        return False
+
+
+def log_email_attempt(
+    *,
+    litter_label: str,
+    recipients: list[str],
+    status: str,
+    provider_message_id: str = "",
+    error_message: str = "",
+) -> bool:
+    """Persist an outbound email alert attempt."""
+    client = get_client()
+    if client is None:
+        return False
+    try:
+        cam_id = get_camera_id()
+        cleaned = [str(r).strip() for r in recipients if str(r).strip()]
+        client.table("email_logs").insert(
+            {
+                "camera_id": cam_id,
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "litter_label": litter_label,
+                "recipients": cleaned,
+                "status": status,
+                "provider": "resend",
+                "provider_message_id": provider_message_id or None,
+                "error_message": error_message or None,
+            }
+        ).execute()
+        return True
+    except Exception as e:
+        logger.warning(f"Log email attempt failed: {e}")
+        return False
+
+
+def list_email_logs(limit: int = 50) -> list[dict]:
+    """Fetch recent email alert logs (newest first)."""
+    client = get_client()
+    if client is None:
+        return []
+    try:
+        res = (
+            client.table("email_logs")
+            .select(
+                "id, occurred_at, litter_label, recipients, status, "
+                "provider, provider_message_id, error_message"
+            )
+            .order("occurred_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        logger.warning(f"List email logs failed: {e}")
+        return []

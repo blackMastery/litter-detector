@@ -6,6 +6,7 @@
 import streamlit as st
 import cv2
 import time
+import re
 import numpy as np
 from PIL import Image
 from pathlib import Path
@@ -19,6 +20,7 @@ from config import (
     CONFIDENCE_THRESHOLD, SNAPSHOT_DIR, LOG_DIR, RECORDING_DIR,
     ENABLE_EMAIL_ALERTS, ENABLE_SMS_ALERTS,
     CAMERA_NAME,
+    LIVE_VIEW_TARGET_FPS,
 )
 
 import os
@@ -41,8 +43,8 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* Hide default Streamlit header */
-#MainMenu, footer, header { visibility: hidden; }
+/* Keep header visible so sidebar toggle remains accessible */
+#MainMenu, footer { visibility: hidden; }
 
 /* Status badges */
 .badge {
@@ -95,6 +97,11 @@ def _init_state():
         "confidence":       CONFIDENCE_THRESHOLD,
         "video_source_label": "🎥 Live Camera (RTSP/Webcam)",
         "alert_status":     None,   # None | {"email": bool, "sms": bool, "time": str}
+        "alert_recipients_raw": "",
+        "alert_recipients": [],
+        "alert_recipients_loaded": False,
+        "enable_email_alerts": ENABLE_EMAIL_ALERTS,
+        "enable_sms_alerts": ENABLE_SMS_ALERTS,
         "recording":        False,
         "recorder":         None,   # cv2.VideoWriter instance
         "recording_path":   None,
@@ -104,6 +111,40 @@ def _init_state():
             st.session_state[k] = v
 
 _init_state()
+
+
+def _parse_recipient_emails(raw: str) -> tuple[list[str], list[str]]:
+    chunks = re.split(r"[\n,;]+", raw or "")
+    parsed = []
+    invalid = []
+    for chunk in chunks:
+        email = chunk.strip()
+        if not email:
+            continue
+        if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            parsed.append(email)
+        else:
+            invalid.append(email)
+    deduped = list(dict.fromkeys(parsed))
+    return deduped, invalid
+
+
+def _send_incident_email(event: dict) -> bool:
+    recipients = list(st.session_state.get("alert_recipients", []))
+    result = dispatch_alerts(
+        event.get("timestamp", ""),
+        event.get("litter_label", "unknown"),
+        recipients,
+        event.get("snapshot_path"),
+        enable_email=st.session_state.enable_email_alerts,
+        enable_sms=False,
+    )
+    st.session_state.alert_status = {
+        "email": result.get("email", False),
+        "sms": False,
+        "time": event.get("timestamp", ""),
+    }
+    return bool(result.get("email", False))
 
 
 # ─────────────────────────────────────────────
@@ -150,6 +191,11 @@ def _read_incidents_csv_bytes(csv_path: str) -> bytes | None:
 @st.cache_data(ttl=30)
 def _list_cloud_snapshots() -> list[dict]:
     return supabase_client.list_cloud_snapshots()
+
+
+@st.cache_data(ttl=10)
+def _list_email_logs() -> list[dict]:
+    return supabase_client.list_email_logs()
 
 
 def _format_snapshot_caption(snap: dict) -> str:
@@ -230,16 +276,53 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🔔 Alerts")
-    st.markdown(
-        f"Email: {'✅ enabled' if ENABLE_EMAIL_ALERTS else '⬜ disabled'}  \n"
-        f"SMS: {'✅ enabled' if ENABLE_SMS_ALERTS else '⬜ disabled'}"
+    _email_mode = st.radio(
+        "Email alerts",
+        options=["Enabled", "Disabled"],
+        index=0 if st.session_state.enable_email_alerts else 1,
+        horizontal=True,
+        help="Controls whether detection events trigger email sends.",
     )
+    st.session_state.enable_email_alerts = (_email_mode == "Enabled")
+
+    if supabase_client.is_configured() and not st.session_state.alert_recipients_loaded:
+        persisted = supabase_client.load_email_recipients()
+        if persisted:
+            st.session_state.alert_recipients_raw = ", ".join(persisted)
+            st.session_state.alert_recipients = persisted
+        st.session_state.alert_recipients_loaded = True
+
+    _raw_emails = st.text_area(
+        "Recipient emails",
+        key="alert_recipients_raw",
+        placeholder="ops@company.com, supervisor@company.com",
+        help="Comma, semicolon, or newline separated list.",
+    )
+    _valid_emails, _invalid_emails = _parse_recipient_emails(_raw_emails)
+    st.session_state.alert_recipients = _valid_emails
+    st.caption(f"Recipients configured: {len(_valid_emails)}")
+    if _invalid_emails:
+        st.warning("Invalid emails skipped: " + ", ".join(_invalid_emails))
+    if supabase_client.is_configured():
+        if st.button("💾 Save recipients", use_container_width=True):
+            ok = supabase_client.save_email_recipients(_valid_emails)
+            if ok:
+                st.success("Recipient list saved to database.")
+            else:
+                st.error("Could not save recipient list to database.")
+
+    st.markdown(
+        f"Email: {'✅ enabled' if st.session_state.enable_email_alerts else '⬜ disabled'}  \n"
+        f"SMS: {'✅ enabled' if st.session_state.enable_sms_alerts else '⬜ disabled'}"
+    )
+    if st.session_state.enable_email_alerts and not _valid_emails:
+        st.warning("Email alerts are enabled but no valid recipients are set.")
     _alert = st.session_state.alert_status
     if _alert:
         _parts = []
-        if ENABLE_EMAIL_ALERTS:
+        if st.session_state.enable_email_alerts:
             _parts.append("📧 " + ("✅ sent" if _alert["email"] else "❌ failed"))
-        if ENABLE_SMS_ALERTS:
+        if st.session_state.enable_sms_alerts:
             _parts.append("📱 " + ("✅ sent" if _alert["sms"] else "❌ failed"))
         if _parts:
             st.caption(f"Last alert ({_alert['time']}): " + "  ".join(_parts))
@@ -363,15 +446,14 @@ with col_btn3:
 
 
 # ─────────────────────────────────────────────
-#  Live view — fragment streams WebSocket deltas
-#  to the browser every 100 ms without triggering
-#  a full page re-render.
+#  Live view — fragment streams WebSocket deltas without a full page re-render.
+#  Refresh interval from LIVE_VIEW_TARGET_FPS (see config.py).
 # ─────────────────────────────────────────────
 
-@st.fragment(run_every=0.1)
+@st.fragment(
+    run_every=max(1.0 / max(LIVE_VIEW_TARGET_FPS, 1), 0.02),
+)
 def _live_view():
-    import threading
-
     cam  = st.session_state.camera
     det  = st.session_state.detector
     conf = st.session_state.confidence
@@ -424,19 +506,6 @@ def _live_view():
                         dump_event.snapshot_path,
                         dump_event.person_conf, dump_event.litter_conf,
                     )
-                    def _alert_and_record(ts, label, snap):
-                        result = dispatch_alerts(ts, label, snap)
-                        st.session_state.alert_status = {
-                            "email": result.get("email", False),
-                            "sms":   result.get("sms", False),
-                            "time":  ts,
-                        }
-                    threading.Thread(
-                        target=_alert_and_record,
-                        args=(dump_event.timestamp, dump_event.litter_label,
-                              dump_event.snapshot_path),
-                        daemon=True,
-                    ).start()
 
     # ── Status badge ──────────────────────────
     dump_occurred = dump_event is not None
@@ -493,10 +562,9 @@ def _live_view():
         if not events:
             st.info("No incidents recorded this session.")
         else:
-            html_parts = []
             for i, ev in enumerate(events):
                 n = len(events) - i
-                html_parts.append(f"""
+                st.markdown(f"""
                 <div class="incident-card">
                   <div class="incident-title">Dumping Event #{n}</div>
                   <div class="incident-meta">
@@ -509,8 +577,20 @@ def _live_view():
                     Litter conf: {ev['litter_conf']:.0%}
                   </div>
                 </div>
-                """)
-            st.markdown("".join(html_parts), unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+                _btn_label = f"📧 Send email for Event #{n}"
+                if st.button(_btn_label, key=f"send_email_incident_{i}", use_container_width=True):
+                    if not st.session_state.enable_email_alerts:
+                        st.warning("Email alerts are disabled. Enable them first.")
+                    elif not st.session_state.alert_recipients:
+                        st.warning("No valid recipients configured.")
+                    else:
+                        with st.spinner("Sending incident email..."):
+                            sent = _send_incident_email(ev)
+                        if sent:
+                            st.success("Incident email sent.")
+                        else:
+                            st.error("Incident email failed. Check Email Logs.")
 
         st.markdown("### 📸 Latest Snapshot")
         snap_events = st.session_state.dump_events
@@ -571,3 +651,42 @@ if supabase_client.is_configured():
         _render_local_snapshot_gallery()
 else:
     _render_local_snapshot_gallery()
+
+
+# ─────────────────────────────────────────────
+#  Email Logs
+# ─────────────────────────────────────────────
+
+st.markdown("---")
+st.markdown("### 📧 Email Logs")
+
+if supabase_client.is_configured():
+    _email_hdr1, _email_hdr2 = st.columns([1, 5])
+    with _email_hdr1:
+        if st.button("🔄 Refresh", key="refresh_email_logs"):
+            _list_email_logs.clear()
+            st.rerun()
+    with _email_hdr2:
+        st.caption("Recent email delivery attempts recorded in Supabase.")
+
+    _email_logs = _list_email_logs()
+    if not _email_logs:
+        st.caption("No email logs yet.")
+    else:
+        _rows = []
+        for log in _email_logs:
+            _recips = log.get("recipients") or []
+            _rows.append(
+                {
+                    "Time": str(log.get("occurred_at") or "").replace("T", " ")[:19],
+                    "Status": log.get("status"),
+                    "Item": log.get("litter_label"),
+                    "Recipients": ", ".join(_recips) if isinstance(_recips, list) else str(_recips),
+                    "Provider": log.get("provider"),
+                    "Message ID": log.get("provider_message_id") or "",
+                    "Error": log.get("error_message") or "",
+                }
+            )
+        st.dataframe(_rows, use_container_width=True, hide_index=True)
+else:
+    st.caption("Email logs are available when Supabase is configured.")
