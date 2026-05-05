@@ -84,6 +84,14 @@ LOG_DIR       = "logs"
 RECORDING_DIR = "recordings"
 MAX_LOG_ENTRIES = 500   # keep last N entries in session
 
+# ── Supabase ──────────────────────────────────
+# Backend: Postgres + Storage. Leave empty to disable Supabase sync.
+SUPABASE_URL          = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY  = os.getenv("SUPABASE_SERVICE_KEY", "")
+SUPABASE_SNAPSHOT_BUCKET  = "snapshots"
+SUPABASE_RECORDING_BUCKET = "recordings"
+SUPABASE_UPLOADS_BUCKET   = "uploads"
+
 # ── Display ───────────────────────────────────
 STREAM_FPS_LIMIT = 15   # target FPS for Streamlit display (lower = less CPU)
 JPEG_QUALITY = 80       # snapshot JPEG quality 1-100

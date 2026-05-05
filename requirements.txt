@@ -15,5 +15,8 @@ twilio>=8.0.0             # SMS alerts
 # Config / secrets
 python-dotenv>=1.0.0      # load credentials from .env instead of config.py
 
+# Backend
+supabase>=2.5.0           # Postgres + Storage backend
+
 # Dev / testing
 # pytest>=8.0.0

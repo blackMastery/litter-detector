@@ -11,6 +11,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from config import LOG_DIR
+import supabase_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +56,11 @@ def log_incident(timestamp: str, litter_label: str,
             snapshot_path,
         ])
     logger.info(f"Incident logged: {timestamp} — {litter_label}")
+
+    if supabase_client.upload_incident(
+        timestamp, litter_label, snapshot_path, person_conf, litter_conf
+    ):
+        logger.info("Incident synced to Supabase")
 
 
 def read_incidents_csv() -> list[dict]:

@@ -14,6 +14,7 @@ from detector import LitterDetector, DumpEvent
 from camera import CameraStream
 from alerts import dispatch_alerts
 import logger as event_logger
+import supabase_client
 from config import (
     CONFIDENCE_THRESHOLD, SNAPSHOT_DIR, LOG_DIR, RECORDING_DIR,
     ENABLE_EMAIL_ALERTS, ENABLE_SMS_ALERTS,
@@ -92,7 +93,7 @@ def _init_state():
         "stat_incidents":   0,
         "session_start":    None,
         "confidence":       CONFIDENCE_THRESHOLD,
-        "video_source":     None,
+        "video_source_label": "🎥 Live Camera (RTSP/Webcam)",
         "alert_status":     None,   # None | {"email": bool, "sms": bool, "time": str}
         "recording":        False,
         "recorder":         None,   # cv2.VideoWriter instance
@@ -134,6 +135,10 @@ def _list_test_footage(footage_dir: str) -> list[str]:
         return []
     return sorted(f.name for f in p.glob("*.mp4"))
 
+@st.cache_data(ttl=10)
+def _list_uploaded_videos() -> list[dict]:
+    return supabase_client.list_uploaded_videos()
+
 @st.cache_data(ttl=30)
 def _read_incidents_csv_bytes(csv_path: str) -> bytes | None:
     p = Path(csv_path)
@@ -159,16 +164,40 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🎬 Video Source")
-    _source_options = ["🎥 Live Camera (RTSP/Webcam)"] + _list_test_footage("test_footage")
+
+    _cloud_videos = _list_uploaded_videos()
+    _local_clips  = _list_test_footage("test_footage")
+
+    LIVE_LABEL = "🎥 Live Camera (RTSP/Webcam)"
+    _source_options = [LIVE_LABEL]
+    _source_options += [f"☁️ {v['name']}" for v in _cloud_videos]
+    _source_options += [f"📁 {n}" for n in _local_clips]
+
     _selected = st.selectbox(
         "Source", _source_options,
         disabled=st.session_state.running,
-        help="Pick a test clip or use the live camera feed"
+        help="☁️ = uploaded to Supabase  ·  📁 = local test_footage/  ·  🎥 = live feed"
     )
-    st.session_state.video_source = (
-        None if _selected == _source_options[0]
-        else str(Path("test_footage") / _selected)
+    st.session_state.video_source_label = _selected
+
+    st.markdown("**Upload test video**")
+    _uploaded = st.file_uploader(
+        "Upload",
+        type=["mp4", "mov", "avi", "mkv"],
+        label_visibility="collapsed",
+        disabled=st.session_state.running,
+        help="Stored in Supabase. Appears as ☁️ in the source dropdown.",
     )
+    if _uploaded is not None and _uploaded.name not in st.session_state.setdefault("_uploaded_seen", set()):
+        with st.spinner(f"Uploading {_uploaded.name}…"):
+            _key = supabase_client.upload_video(_uploaded.name, _uploaded.getvalue())
+        if _key:
+            st.session_state["_uploaded_seen"].add(_uploaded.name)
+            _list_uploaded_videos.clear()
+            st.success(f"Uploaded {_uploaded.name}")
+            st.rerun()
+        else:
+            st.error("Upload failed — check SUPABASE_URL / SUPABASE_SERVICE_KEY in `.env`.")
 
     st.markdown("---")
     st.markdown("### 🔔 Alerts")
@@ -253,7 +282,22 @@ with col_btn1:
                         st.error(f"Model load failed: {e}\n\nCheck that `{__import__('config').GARBAGE_MODEL_PATH}` and `{__import__('config').PERSON_MODEL_PATH}` exist in the project folder.")
                         st.stop()
 
-            cam = CameraStream(source=st.session_state.video_source)
+            # Resolve source label to a real path / None
+            label = st.session_state.get("video_source_label", "🎥 Live Camera (RTSP/Webcam)")
+            if label.startswith("☁️ "):
+                _name = label[2:].strip()
+                with st.spinner(f"Downloading {_name}…"):
+                    _tmp = supabase_client.download_video_to_temp(_name)
+                if _tmp is None:
+                    st.error(f"Could not download {_name} from Supabase.")
+                    st.stop()
+                source = str(_tmp)
+            elif label.startswith("📁 "):
+                source = str(Path("test_footage") / label[2:].strip())
+            else:
+                source = None  # live camera
+
+            cam = CameraStream(source=source)
             if cam.start():
                 st.session_state.camera = cam
                 st.session_state.running = True
