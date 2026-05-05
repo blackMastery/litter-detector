@@ -147,6 +147,35 @@ def _read_incidents_csv_bytes(csv_path: str) -> bytes | None:
     return p.read_bytes()
 
 
+@st.cache_data(ttl=30)
+def _list_cloud_snapshots() -> list[dict]:
+    return supabase_client.list_cloud_snapshots()
+
+
+def _format_snapshot_caption(snap: dict) -> str:
+    ts = (snap.get("captured_at") or "").replace("T", " ")
+    if len(ts) > 19:
+        ts = ts[:19]
+    parts = [snap.get("camera_name"), snap.get("litter_label"), ts or None]
+    label = " · ".join(p for p in parts if p)
+    return label if label else str(snap.get("storage_path", ""))
+
+
+def _render_local_snapshot_gallery():
+    _snap_items = _list_snapshots(SNAPSHOT_DIR)
+    if not _snap_items:
+        st.caption(
+            "No snapshots yet. Snapshots are saved automatically when a dumping event is detected."
+        )
+    else:
+        _cols = 4
+        for i in range(0, len(_snap_items), _cols):
+            row = _snap_items[i : i + _cols]
+            for col, (snap_path_str, snap_stem) in zip(st.columns(_cols), row):
+                with col:
+                    st.image(Path(snap_path_str), use_container_width=True, caption=snap_stem)
+
+
 # ─────────────────────────────────────────────
 #  Sidebar
 # ─────────────────────────────────────────────
@@ -507,13 +536,38 @@ _live_view()
 st.markdown("---")
 st.markdown("### 📸 Snapshot Gallery")
 
-_snap_items = _list_snapshots(SNAPSHOT_DIR)
-if not _snap_items:
-    st.caption("No snapshots yet. Snapshots are saved automatically when a dumping event is detected.")
+if supabase_client.is_configured():
+    _tab_cloud, _tab_local = st.tabs(["☁️ Supabase", "📁 Local"])
+    with _tab_cloud:
+        _hdr1, _hdr2 = st.columns([1, 5])
+        with _hdr1:
+            if st.button("🔄 Refresh", key="refresh_cloud_snapshots"):
+                _list_cloud_snapshots.clear()
+                st.rerun()
+        with _hdr2:
+            st.caption("Synced incident snapshots from your project database + storage.")
+        _cloud_snaps = _list_cloud_snapshots()
+        if not _cloud_snaps:
+            st.caption(
+                "No snapshots in Supabase yet. They appear after a dumping incident is logged "
+                "while `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` are set."
+            )
+        else:
+            _cols = 4
+            for i in range(0, len(_cloud_snaps), _cols):
+                row = _cloud_snaps[i : i + _cols]
+                for col, snap in zip(st.columns(_cols), row):
+                    with col:
+                        _url = snap.get("public_url") or ""
+                        if _url:
+                            st.image(
+                                _url,
+                                use_container_width=True,
+                                caption=_format_snapshot_caption(snap),
+                            )
+                        else:
+                            st.caption(snap.get("storage_path", "(no URL)"))
+    with _tab_local:
+        _render_local_snapshot_gallery()
 else:
-    _cols_per_row = 4
-    for i in range(0, len(_snap_items), _cols_per_row):
-        _row = _snap_items[i:i + _cols_per_row]
-        for col, (snap_path_str, snap_stem) in zip(st.columns(_cols_per_row), _row):
-            with col:
-                st.image(Path(snap_path_str), use_container_width=True, caption=snap_stem)
+    _render_local_snapshot_gallery()

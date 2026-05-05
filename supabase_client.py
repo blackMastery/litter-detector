@@ -16,6 +16,10 @@ _client = None
 _camera_id: Optional[str] = None
 
 
+def is_configured() -> bool:
+    return bool(config.SUPABASE_URL and config.SUPABASE_SERVICE_KEY)
+
+
 def get_client():
     global _client
     if _client is not None:
@@ -147,3 +151,77 @@ def download_video_to_temp(name: str) -> Optional[Path]:
     except Exception as e:
         logger.warning(f"Video download failed: {e}")
         return None
+
+
+def snapshot_public_url(storage_path: str) -> str:
+    """Public URL for a file in the snapshots bucket (bucket must be public or URL will 403)."""
+    client = get_client()
+    if client is None:
+        return ""
+    return client.storage.from_(config.SUPABASE_SNAPSHOT_BUCKET).get_public_url(
+        storage_path
+    )
+
+
+def list_cloud_snapshots(limit: int = 48) -> list[dict]:
+    """
+    Rows from `snapshots` (newest first) with image URL and optional labels from related rows.
+    Each dict: id, storage_path, captured_at, file_size_bytes, camera_name, litter_label, public_url.
+    """
+    client = get_client()
+    if client is None:
+        return []
+    try:
+        sel = (
+            "id, storage_path, captured_at, file_size_bytes, "
+            "cameras(name), incidents(litter_label)"
+        )
+        res = (
+            client.table("snapshots")
+            .select(sel)
+            .order("captured_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as e:
+        logger.warning(f"List cloud snapshots (with joins) failed: {e}")
+        try:
+            res = (
+                client.table("snapshots")
+                .select("id, storage_path, captured_at, file_size_bytes")
+                .order("captured_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            rows = res.data or []
+        except Exception as e2:
+            logger.warning(f"List cloud snapshots failed: {e2}")
+            return []
+
+    out: list[dict] = []
+    for row in rows:
+        cam = row.get("cameras")
+        cam_name = None
+        if isinstance(cam, dict):
+            cam_name = cam.get("name")
+        inc = row.get("incidents")
+        litter_label = None
+        if isinstance(inc, list) and inc:
+            litter_label = inc[0].get("litter_label")
+        elif isinstance(inc, dict):
+            litter_label = inc.get("litter_label")
+
+        path = row["storage_path"]
+        out.append(
+            {
+                "id": row["id"],
+                "storage_path": path,
+                "captured_at": row["captured_at"],
+                "file_size_bytes": row.get("file_size_bytes"),
+                "camera_name": cam_name,
+                "litter_label": litter_label,
+                "public_url": snapshot_public_url(path),
+            }
+        )
+    return out
