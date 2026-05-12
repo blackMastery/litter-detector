@@ -5,6 +5,8 @@
 streamlit>=1.37.0
 ultralytics>=8.3.0        # YOLO11 (includes PyTorch)
 opencv-python-headless>=4.9.0
+# Prevent ultralytics from pulling in the GUI build of opencv on headless servers
+opencv-contrib-python-headless>=4.9.0
 numpy>=1.26.0
 Pillow>=10.2.0
 pandas>=2.2.0
