@@ -100,6 +100,8 @@ def _init_state():
         "alert_recipients_raw": "",
         "alert_recipients": [],
         "alert_recipients_loaded": False,
+        "rtsp_url": "",
+        "rtsp_url_loaded": False,
         "enable_email_alerts": ENABLE_EMAIL_ALERTS,
         "enable_sms_alerts": ENABLE_SMS_ALERTS,
         "recording":        False,
@@ -255,6 +257,26 @@ with st.sidebar:
     )
     st.session_state.video_source_label = _selected
 
+    if supabase_client.is_configured() and not st.session_state.rtsp_url_loaded:
+        _persisted_rtsp = supabase_client.load_rtsp_url()
+        st.session_state.rtsp_url = _persisted_rtsp or __import__("config").RTSP_URL
+        st.session_state.rtsp_url_loaded = True
+
+    st.text_input(
+        "RTSP URL",
+        key="rtsp_url",
+        placeholder="rtsp://user:pass@host:554/...",
+        disabled=st.session_state.running,
+        help="Applied next time you click Start with Live Camera selected.",
+    )
+    if supabase_client.is_configured():
+        if st.button("💾 Save RTSP URL", use_container_width=True,
+                     disabled=st.session_state.running):
+            if supabase_client.save_rtsp_url(st.session_state.rtsp_url.strip()):
+                st.success("RTSP URL saved.")
+            else:
+                st.error("Could not save RTSP URL to database.")
+
     st.markdown("**Upload test video**")
     _uploaded = st.file_uploader(
         "Upload",
@@ -407,7 +429,7 @@ with col_btn1:
             elif label.startswith("📁 "):
                 source = str(Path("test_footage") / label[2:].strip())
             else:
-                source = None  # live camera
+                source = (st.session_state.rtsp_url or "").strip() or None  # live camera
 
             cam = CameraStream(source=source)
             if cam.start():

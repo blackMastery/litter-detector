@@ -84,7 +84,7 @@ MAX_LOG_ENTRIES = 500   # keep last N entries in session
 # ── Supabase ──────────────────────────────────
 # Backend: Postgres + Storage. Leave empty to disable Supabase sync.
 SUPABASE_URL          = "https://oezpwkmifizigkodxufg.supabase.co"
-SUPABASE_SERVICE_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lenB3a21pZml6aWdrb2R4dWZnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MTk1MDA1OSwiZXhwIjoyMDc3NTI2MDU5fQ.1TLYv3HpXkXHiWL8L-9Q2esuOnBnbOsusPzCRkUHYt4'
+SUPABASE_SERVICE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9lenB3a21pZml6aWdrb2R4dWZnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MTk1MDA1OSwiZXhwIjoyMDc3NTI2MDU5fQ.1TLYv3HpXkXHiWL8L-9Q2esuOnBnbOsusPzCRkUHYt4"
 SUPABASE_SNAPSHOT_BUCKET  = "snapshots"
 SUPABASE_RECORDING_BUCKET = "recordings"
 SUPABASE_UPLOADS_BUCKET   = "uploads"

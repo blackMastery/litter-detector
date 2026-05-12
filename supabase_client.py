@@ -278,6 +278,45 @@ def save_email_recipients(recipients: list[str]) -> bool:
         return False
 
 
+def load_rtsp_url() -> str:
+    """Load the persisted RTSP URL for the current camera."""
+    client = get_client()
+    if client is None:
+        return ""
+    try:
+        res = (
+            client.table("cameras")
+            .select("rtsp_url")
+            .eq("name", config.CAMERA_NAME)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return ""
+        return str(res.data[0].get("rtsp_url") or "").strip()
+    except Exception as e:
+        logger.warning(f"Load RTSP URL failed: {e}")
+        return ""
+
+
+def save_rtsp_url(url: str) -> bool:
+    """Persist the RTSP URL for the current camera."""
+    global _camera_id
+    client = get_client()
+    if client is None:
+        return False
+    try:
+        client.table("cameras").upsert(
+            {"name": config.CAMERA_NAME, "rtsp_url": url.strip()},
+            on_conflict="name",
+        ).execute()
+        _camera_id = None
+        return True
+    except Exception as e:
+        logger.warning(f"Save RTSP URL failed: {e}")
+        return False
+
+
 def log_email_attempt(
     *,
     litter_label: str,
